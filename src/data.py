@@ -61,6 +61,19 @@ with open(COTAHIST_PATH, "r", encoding="latin-1") as file:
         avg_price = float(avg_raw) / 100 if avg_raw else None
         close_price = float(close_raw) / 100
 
+        # liquidez
+        trade_raw = line[147:152].strip()
+        quantity_raw = line[152:170].strip()
+        volume_raw = line[170:188].strip()
+
+        trades = int(trade_raw) if trade_raw else 0
+        quantity = int(quantity_raw) if quantity_raw else 0
+        financial_volume = (
+            float(volume_raw) / 100
+            if volume_raw 
+            else 0
+        )
+
         # adiciona registro
         records.append({
             "date": date,
@@ -71,8 +84,11 @@ with open(COTAHIST_PATH, "r", encoding="latin-1") as file:
             "open": open_price,
             "high": high_price,
             "low": low_price,
-            "avg": avg_price,
+            "avg_price": avg_price,
             "close": close_price,
+            "trades": trades,
+            "quantity": quantity,
+            "financial_volume": financial_volume
         })
 
 
@@ -98,6 +114,7 @@ print(prices.head())
 
 print("\nTIPOS DAS COLUNAS:")
 print(prices.dtypes)
+
 print("\nTIPOS DE ATIVOS:")
 print(
     prices["security_type"]
@@ -108,6 +125,21 @@ print("\nTIPOS DE MERCADO:")
 print(
     prices["market_type"]
     .value_counts()
+)
+
+print("\nLIQUIDEZ:")
+print(
+    prices[
+        ["trades",
+            "quantity",
+            "financial_volume"
+            ]
+        ].head()
+)
+
+print("\nESTATÍSTICAS DO VOLUME FINANCEIRO:")
+print(
+    prices["financial_volume"].describe()
 )
 
 # salva a base processada
