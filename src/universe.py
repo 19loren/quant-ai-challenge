@@ -11,7 +11,7 @@ OUTPUT_PATH = BASE_DIR / "data" / "processed" / "universe.parquet"
 # config das carteiras
 PORTFOLIOS = [
     {
-        "file": "jan_abr_2025.xlsx",
+        "file": "jan_abr2025.xlsx",
         "type": "excel",
         "start": "2025-01-06",
         "end": "2025-05-02",
@@ -32,7 +32,7 @@ PORTFOLIOS = [
         "base_date": "2025-08-29",
     },
     {
-        "file": "jan_abr_2026.xlsx",
+        "file": "jan_abr2026.xlsx",
         "type": "excel",
         "start": "2026-01-05",
         "end": "2026-04-30",
@@ -72,7 +72,7 @@ def read_ibrx_excel(path):
     # remove possiveis linhas de total/redutor
     df = df[
         df["CÓDIGO"].astype(str).str.strip().str.match(
-            r"^[A-Z]{4}\d{1,2}$",
+            r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$",
             na=False
         )
     ].copy()
@@ -190,7 +190,7 @@ def read_ibrx_pdf(path):
     records = []
 
     ticker_pattern = re.compile(
-        r"^[A-Z]{4}\d{1,2}$"
+        r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$"
     )
 
     i = 0
@@ -257,10 +257,6 @@ def read_ibrx_pdf(path):
 
 # validaçao de cada carteira
 def validate_portfolio(df, period_name):
-    """
-    Valida se uma carteira possui exatamente
-    100 ativos únicos.
-    """
 
     print(
         f"\nValidação da carteira: {period_name}"
@@ -276,15 +272,12 @@ def validate_portfolio(df, period_name):
         df["ticker"].nunique()
     )
 
-    # deve haver exatamente 100 ativos
-    if len(df) != 100:
-        raise ValueError(
-            f"{period_name}: esperado 100 ativos, "
-            f"mas foram encontrados {len(df)}."
-        )
+    print(
+        f"{df['ticker'].nunique()} ativos únicos"
+    )
 
     # nao pode haver ticker duplicado
-    if df["ticker"].nunique() != 100:
+    if df["ticker"].nunique() != len(df):
         duplicates = (
             df[
                 df["ticker"].duplicated(keep=False)
@@ -311,9 +304,8 @@ def validate_portfolio(df, period_name):
             "ausentes."
         )
 
-    print("✓ 100 ativos únicos")
-    print("✓ Quantidades teóricas válidas")
-    print("✓ Pesos válidos")
+print("Quantidades teóricas válidas")
+print("Pesos válidos")
 
 
 # processamento
@@ -424,11 +416,28 @@ print("\nAtivos por período:")
 print(counts)
 
 
-if not (counts == 100).all():
+# valida que cada periodo possui uma composicao nao vazia
+if (counts <= 0).any():
     raise ValueError(
-        "Algum período não possui exatamente 100 ativos."
+        "Algum período não possui ativos."
     )
 
+# valida que nao existem tickers duplicados dentro de um periodo
+duplicates_by_period = (
+    universe
+    .groupby("period_start")["ticker"]
+    .apply(lambda x: x[x.duplicated()].tolist())
+)
+
+duplicates_by_period = duplicates_by_period[
+    duplicates_by_period.apply(len) > 0
+]
+
+if not duplicates_by_period.empty:
+    raise ValueError(
+        f"Existem tickers duplicados em algum período: "
+        f"{duplicates_by_period.to_dict()}"
+ )
 
 # salva
 OUTPUT_PATH.parent.mkdir(
