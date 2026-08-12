@@ -2,14 +2,25 @@ from pathlib import Path
 import pandas as pd
 
 
-COTAHIST_PATH = Path("data/raw/b3_quotes/COTAHIST_A2025.TXT")
+COTAHIST_DIR = Path("data/raw/b3_quotes")
+
+COTAHIST_FILES = sorted(
+    COTAHIST_DIR.glob("COTAHIST_A*.TXT")
+)
+
+print("Arquivos COTAHIST encontrados:")
+
+for file_path in COTAHIST_FILES:
+    print(file_path)
 
 
 # lista para armazenar as cotações
 records = []
 
+for cotahist_path in COTAHIST_FILES:
+    print(f"\nProcessando arquivo: {cotahist_path.name}")
 
-with open(COTAHIST_PATH, "r", encoding="latin-1") as file:
+with open(cotahist_path, "r", encoding="latin-1") as file:
 
     # ignora o header
     file.readline()
