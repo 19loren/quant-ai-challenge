@@ -1,29 +1,36 @@
 from pathlib import Path
 import pandas as pd
 
+BASE_DIR = Path(__file__).resolve().parents[1]
 
-COTAHIST_DIR = Path("data/raw/b3_quotes")
+COTAHIST_DIR = BASE_DIR / "data" / "raw" / "b3_quotes"
+OUTPUT_PATH = BASE_DIR / "data" / "processed" / "prices.parquet"
 
-COTAHIST_FILES = sorted(
-    COTAHIST_DIR.glob("COTAHIST_A*.TXT")
-)
+# config
+VALID_MARKET_TYPE = "010"
 
-print("Arquivos COTAHIST encontrados:")
+VALID_SECURITY_TYPES = {
+    "ON",
+    "PN",
+    "PNA",
+    "PNB",
+    "UNT",
+}
 
-for file_path in COTAHIST_FILES:
-    print(file_path)
+def parse_cotahist_file(filepath):
 
+    records = []
 
-# lista para armazenar as cotações
-records = []
+    print(f"\nProcessando arquivo: {filepath.name}")
 
-for cotahist_path in COTAHIST_FILES:
-    print(f"\nProcessando arquivo: {cotahist_path.name}")
+    with open(
+        filepath,
+        "r", 
+        encoding="latin-1"
+        ) as file:
 
-with open(cotahist_path, "r", encoding="latin-1") as file:
-
-    # ignora o header
-    file.readline()
+        # ignora o header
+        file.readline()
 
     for line in file:
 
@@ -45,13 +52,13 @@ with open(cotahist_path, "r", encoding="latin-1") as file:
         name = line[27:39].strip()
         security_type = line[39:49].strip()
 
-        # mantem apenas o mercado à vista
-        if market_type != "010":
+
+        if market_type != VALID_MARKET_TYPE:
              continue
 
         # mantem apenas açoes e units
         security_base = security_type.split()[0]
-        if security_base not in {"ON", "PN", "PNA", "PNB", "UNT"}:
+        if security_base not in VALID_SECURITY_TYPES:
             continue
         
         # preços
@@ -77,8 +84,18 @@ with open(cotahist_path, "r", encoding="latin-1") as file:
         quantity_raw = line[152:170].strip()
         volume_raw = line[170:188].strip()
 
-        trades = int(trade_raw) if trade_raw else 0
-        quantity = int(quantity_raw) if quantity_raw else 0
+        trades = (
+            int(trade_raw) 
+            if trade_raw 
+            else 0
+            )
+        
+        quantity = (
+            int(quantity_raw)
+            if quantity_raw 
+            else 0
+            )
+        
         financial_volume = (
             float(volume_raw) / 100
             if volume_raw 
@@ -86,7 +103,8 @@ with open(cotahist_path, "r", encoding="latin-1") as file:
         )
 
         # adiciona registro
-        records.append({
+        records.append(
+            {
             "date": date,
             "ticker": ticker,
             "market_type": market_type,
@@ -100,71 +118,113 @@ with open(cotahist_path, "r", encoding="latin-1") as file:
             "trades": trades,
             "quantity": quantity,
             "financial_volume": financial_volume
-        })
+        }
+    )
+    return pd.DataFrame(records)
 
+# le todos os arquivos encontrados na b3 e retorna o preço
+def load_prices():
 
-prices = pd.DataFrame(records)
+    files = sorted(
+        COTAHIST_DIR.glob("COTAHIST_A*.TXT")
+    )
 
-# converte data
-prices["date"] = pd.to_datetime(
+    if not files:
+        raise FileNotFoundError(
+            f"Nenhum arquivo COTAHIST encontrado em: "
+            f"{COTAHIST_DIR}"
+        )
+
+    print("PIPELINE DE PREÇOS B3")
+    print(f"\nArquivos encontrados: {len(files)}")
+
+    for file in files:
+        print(f" - {file.name}")
+
+    all_prices = []
+
+    for file in files:
+        df = parse_cotahist_file(file)
+
+        print(f"Registros elegíveis: {len(df):,}")
+
+        all_prices.append(df)
+
+    prices = pd.concat(
+        all_prices,
+        ignore_index=True
+    )
+
+    return prices
+
+# padronizacao
+def standardize_prices(prices):
+
+    prices = prices.copy()
+
+    prices["date"] = pd.to_datetime(
     prices["date"],
     format="%Y%m%d"
 )
 
-# ordena
-prices = prices.sort_values(
-    ["ticker", "date"]
-).reset_index(drop=True)
+    prices = (
+        prices.sort_values(
+            ["ticker", "date"]
+        ).reset_index(drop=True)
+    ) 
 
-# informações do dataset
-print("Quantidade de registros:", len(prices))
-print("Quantidade de ativos:", prices["ticker"].nunique())
+    return prices
 
-print("\nPRIMEIROS REGISTROS:")
-print(prices.head())
+def save_prices(prices):
 
-print("\nTIPOS DAS COLUNAS:")
-print(prices.dtypes)
+    OUTPUT_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-print("\nTIPOS DE ATIVOS:")
-print(
-    prices["security_type"]
-    .value_counts()
-    .head(30)
-)
-print("\nTIPOS DE MERCADO:")
-print(
-    prices["market_type"]
-    .value_counts()
-)
+    prices.to_parquet(
+        OUTPUT_PATH,
+        index=False
+    )
 
-print("\nLIQUIDEZ:")
-print(
-    prices[
-        ["trades",
-            "quantity",
-            "financial_volume"
-            ]
-        ].head()
-)
+    print(f"\nArquivo salvo em:\n{OUTPUT_PATH}")
+    print(f"Linhas salvas: {len(prices):,}")
 
-print("\nESTATÍSTICAS DO VOLUME FINANCEIRO:")
-print(
-    prices["financial_volume"].describe()
-)
 
-# salva a base processada
-OUTPUT_PATH = Path("data/processed/prices.parquet")
+# MAIN POR ENQUANTO
+def main():
 
-OUTPUT_PATH.parent.mkdir(
-    parents=True,
-    exist_ok=True
-)
+    prices = load_prices()
+    prices = standardize_prices(prices)
 
-prices.to_parquet(
-    OUTPUT_PATH,
-    index=False
-)
+    print("RESULTADO")
+    print(
+        f"\nQuantidade de registros: "
+        f"{len(prices):,}"
+    )
 
-print(f"\nArquivo salvo em: {OUTPUT_PATH}")
-print(f"Linhas salvas: {len(prices)}")
+    print(
+        f"Quantidade de ativos: "
+        f"{prices['ticker'].nunique():,}"
+    )
+
+    print(
+        f"Período: "
+        f"{prices['date'].min().date()} "
+        f"→ "
+        f"{prices['date'].max().date()}"
+    )
+
+    print("\nPrimeiros registros:")
+    print(
+        prices.head()
+        .to_string(index=False)
+    )
+
+    print("\nTipos das colunas:")
+    print(prices.dtypes)
+
+    save_prices(prices)
+
+if __name__ == "__main__":
+    main()

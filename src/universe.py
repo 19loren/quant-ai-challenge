@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+
 import pandas as pd
 import pymupdf
 
@@ -47,6 +48,10 @@ PORTFOLIOS = [
     },
 ]
 
+TICKER_PATTERN = re.compile(
+    r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$"
+)
+
 # ler ibxx excel
 def read_ibrx_excel(path):
 
@@ -71,8 +76,11 @@ def read_ibrx_excel(path):
 
     # remove possiveis linhas de total/redutor
     df = df[
-        df["CÓDIGO"].astype(str).str.strip().str.match(
-            r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$",
+        df["CÓDIGO"]
+        .astype(str)
+        .str.strip()
+        .str.match(
+            TICKER_PATTERN,
             na=False
         )
     ].copy()
@@ -130,8 +138,6 @@ def read_ibrx_pdf(path):
 
     pdf = pymupdf.open(path)
 
-    # pag 7 = índice 6
-    # pag 8 = índice 7
     text = ""
 
     for page_number in [6, 7]:
@@ -147,7 +153,10 @@ def read_ibrx_pdf(path):
     end_marker = "IEE"
 
     start = text.find(start_marker)
-    end = text.find(end_marker, start + len(start_marker))
+    end = text.find(
+        end_marker,
+        start + len(start_marker)
+    )
 
     if start == -1:
         raise ValueError(
@@ -189,16 +198,12 @@ def read_ibrx_pdf(path):
 
     records = []
 
-    ticker_pattern = re.compile(
-        r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$"
-    )
-
     i = 0
 
     while i < len(lines):
 
         # procura o proximo ticker
-        if not ticker_pattern.match(lines[i]):
+        if not TICKER_PATTERN.match(lines[i]):
             i += 1
             continue
 
@@ -262,27 +267,24 @@ def validate_portfolio(df, period_name):
         f"\nValidação da carteira: {period_name}"
     )
 
+    record_count = len(df)
+    ticker_count = df["ticker"].nunique()
+
     print(
-        "Quantidade de registros:",
-        len(df)
+        f"Quantidade de registros: {record_count}"
     )
 
     print(
-        "Quantidade de tickers únicos:",
-        df["ticker"].nunique()
+        f"Quantidade de tickers únicos: {ticker_count}"
     )
 
-    print(
-        f"{df['ticker'].nunique()} ativos únicos"
-    )
-
-    # nao pode haver ticker duplicado
-    if df["ticker"].nunique() != len(df):
+    if ticker_count != record_count:
         duplicates = (
             df[
-                df["ticker"].duplicated(keep=False)
-            ]["ticker"]
-            .tolist()
+                df["ticker"].duplicated(
+                    keep=False
+                )
+            ]["ticker"].tolist()
         )
 
         raise ValueError(
@@ -304,175 +306,192 @@ def validate_portfolio(df, period_name):
             "ausentes."
         )
 
-print("Quantidades teóricas válidas")
-print("Pesos válidos")
-
 
 # processamento
-all_portfolios = []
+def build_universe():
+
+    all_portfolios = []
 
 
-for portfolio in PORTFOLIOS:
+    for portfolio in PORTFOLIOS:
 
-    file_path = IBRX_DIR / portfolio["file"]
-
-    if not file_path.exists():
-        raise FileNotFoundError(
-            f"Arquivo não encontrado: {file_path}"
+        file_path = (
+            IBRX_DIR / portfolio["file"]
         )
 
-    # excel
-    if portfolio["type"] == "excel":
+        if not file_path.exists():
+            raise FileNotFoundError(
+                f"Arquivo não encontrado: {file_path}"
+            )
 
-        df = read_ibrx_excel(
-            file_path
+        # excel
+        if portfolio["type"] == "excel":
+
+            df = read_ibrx_excel(
+                file_path
+            )
+
+        # pdf
+        elif portfolio["type"] == "pdf":
+
+            df = read_ibrx_pdf(
+                file_path
+            )
+
+        else:
+            raise ValueError(
+                f"Tipo de arquivo desconhecido: "
+                f"{portfolio['type']}"
+            )
+
+        validate_portfolio(
+            df,
+            portfolio["file"]
         )
 
-    # pdf
-    elif portfolio["type"] == "pdf":
-
-        df = read_ibrx_pdf(
-            file_path
+        df["period_start"] = pd.to_datetime(
+            portfolio["start"]
         )
 
-    else:
+        df["period_end"] = pd.to_datetime(
+            portfolio["end"]
+        )
+
+        df["base_date"] = pd.to_datetime(
+            portfolio["base_date"]
+        )
+
+        df["index"] = "IBRX100"
+
+        # guarda o periodo
+        df["source_file"] = portfolio["file"]
+
+        all_portfolios.append(df)
+
+
+    # consolidaçao
+    universe = pd.concat(
+        all_portfolios,
+        ignore_index=True
+    )
+
+
+    # ordena
+    universe = universe.sort_values(
+        [
+            "period_start",
+            "ticker"
+        ]
+    ).reset_index(drop=True)
+
+    universe = (
+        universe
+        .sort_values(
+            [
+                "period_start",
+                "ticker",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+    return universe
+
+def validate_universe(universe):
+
+    print("\nValidação final do universo")
+
+    print(
+        f"Quantidade total de registros: "
+        f"{len(universe)}"
+    )
+
+    print(
+        f"Quantidade de períodos: "
+        f"{universe['period_start'].nunique()}"
+    )
+
+    print(
+        f"Quantidade de tickers únicos no histórico: "
+        f"{universe['ticker'].nunique()}"
+    )
+
+    counts = (
+        universe
+        .groupby("period_start")["ticker"]
+        .nunique()
+    )
+
+    print("\nAtivos por período:")
+    print(counts)
+
+    if (counts <= 0).any():
         raise ValueError(
-            f"Tipo de arquivo desconhecido: "
-            f"{portfolio['type']}"
+            "Algum período não possui ativos."
         )
 
-    # validaçao
-    validate_portfolio(
-        df,
-        portfolio["file"]
+    duplicates_by_period = (
+        universe
+        .groupby("period_start")["ticker"]
+        .apply(
+            lambda x: x[x.duplicated()].tolist()
+        )
     )
 
-    # adc info ao periodo
-    df["period_start"] = pd.to_datetime(
-        portfolio["start"]
+    duplicates_by_period = (
+        duplicates_by_period[
+            duplicates_by_period.apply(len) > 0
+        ]
     )
 
-    df["period_end"] = pd.to_datetime(
-        portfolio["end"]
+    if not duplicates_by_period.empty:
+        raise ValueError(
+            "Existem tickers duplicados em algum período: "
+            f"{duplicates_by_period.to_dict()}"
+        )
+
+def save_universe(universe):
+
+    OUTPUT_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    df["base_date"] = pd.to_datetime(
-        portfolio["base_date"]
+    universe.to_parquet(
+        OUTPUT_PATH,
+        index=False,
     )
 
-    df["index"] = "IBRX100"
-
-    # guarda o periodo
-    df["source_file"] = portfolio["file"]
-
-    all_portfolios.append(df)
-
-
-# consolidaçao
-universe = pd.concat(
-    all_portfolios,
-    ignore_index=True
-)
-
-
-# ordena
-universe = universe.sort_values(
-    [
-        "period_start",
-        "ticker"
-    ]
-).reset_index(drop=True)
-
-
-# validaçao final
-print("\n" + "=" * 60)
-print("VALIDAÇÃO FINAL DO UNIVERSO")
-print("=" * 60)
-
-print(
-    "\nQuantidade total de registros:",
-    len(universe)
-)
-
-print(
-    "Quantidade de períodos:",
-    universe["period_start"].nunique()
-)
-
-print(
-    "Quantidade de tickers únicos no histórico:",
-    universe["ticker"].nunique()
-)
-
-
-# cada periodo deve possuir 100 ativos
-counts = (
-    universe
-    .groupby("period_start")["ticker"]
-    .nunique()
-)
-
-print("\nAtivos por período:")
-print(counts)
-
-
-# valida que cada periodo possui uma composicao nao vazia
-if (counts <= 0).any():
-    raise ValueError(
-        "Algum período não possui ativos."
+    print(
+        f"\nArquivo salvo em:\n{OUTPUT_PATH}"
     )
 
-# valida que nao existem tickers duplicados dentro de um periodo
-duplicates_by_period = (
-    universe
-    .groupby("period_start")["ticker"]
-    .apply(lambda x: x[x.duplicated()].tolist())
-)
-
-duplicates_by_period = duplicates_by_period[
-    duplicates_by_period.apply(len) > 0
-]
-
-if not duplicates_by_period.empty:
-    raise ValueError(
-        f"Existem tickers duplicados em algum período: "
-        f"{duplicates_by_period.to_dict()}"
- )
-
-# salva
-OUTPUT_PATH.parent.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-universe.to_parquet(
-    OUTPUT_PATH,
-    index=False
-)
+    print(
+        f"Linhas salvas: {len(universe)}"
+    )
 
 
-# resultado
-print("\n" + "=" * 60)
-print("UNIVERSO IBRS-100 GERADO COM SUCESSO")
-print("=" * 60)
 
-print(
-    f"\nArquivo salvo em:\n{OUTPUT_PATH}"
-)
+# PROVISORIO
+def main():
+    """Runs the complete historical universe pipeline."""
 
-print(
-    "\nLinhas salvas:",
-    len(universe)
-)
+    universe = build_universe()
 
-print(
-    "Períodos:",
-    universe["period_start"]
-    .dt.strftime("%Y-%m-%d")
-    .unique()
-)
+    validate_universe(
+        universe
+    )
 
-print("\nPrimeiros registros:")
-print(
-    universe.head(10)
-)
+    save_universe(
+        universe
+    )
+
+    print("\nPrimeiros registros:")
+
+    print(
+        universe.head(10)
+    )
+
+
+if __name__ == "__main__":
+    main()
