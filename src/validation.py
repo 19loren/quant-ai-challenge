@@ -21,7 +21,7 @@ def validate_prices(prices):
 
     print(
         f"Período: "
-        f"{prices['date'].min()} → "
+        f"{prices['date'].min()} -> "
         f"{prices['date'].max()}"
     )
 
@@ -172,7 +172,7 @@ def validate_fundamentals(fundamentals):
 
     print(
         f"Período: "
-        f"{fundamentals['DT_FIM_EXERC'].min()} → "
+        f"{fundamentals['DT_FIM_EXERC'].min()} -> "
         f"{fundamentals['DT_FIM_EXERC'].max()}"
     )
 

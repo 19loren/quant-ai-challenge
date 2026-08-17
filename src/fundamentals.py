@@ -8,10 +8,17 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 CVM_DIR = BASE_DIR / "data" / "raw" / "cvm" / "dfp"
 OUTPUT_PATH = BASE_DIR / "data" / "processed" / "fundamentals.parquet"
 
-DFP_YEARS = [2024, 2025]
+DFP_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025]
 
-NET_INCOME_ACCOUNT = "3.11.01"
-EQUITY_ACCOUNT = "2.07.01"
+NET_INCOME_ACCOUNT = "3.11"
+NET_INCOME_PATTERN = r"lucro|resultado"
+
+# empresas "normais" reportam patrimônio líquido em 2.03; algumas
+# instituições financeiras usam um plano de contas diferente onde
+# 2.03 é outra coisa (ex.: "Provisões") e o PL está em 2.07 —
+# por isso são dois códigos candidatos, validados pelo texto da conta
+EQUITY_ACCOUNTS = ["2.03", "2.07"]
+EQUITY_PATTERN = r"patrim[oô]nio\s+l[ií]quido"
 
 
 def read_cvm_csv(path):
@@ -54,47 +61,63 @@ def normalize_cvm_code(series):
 def load_dfp_data(year):
     year_dir = CVM_DIR / str(year)
 
-    dre_path = (
-        year_dir
-        / f"dfp_cia_aberta_DRE_con_{year}.csv"
-    )
-
-    bpp_path = (
-        year_dir
-        / f"dfp_cia_aberta_BPP_con_{year}.csv"
-    )
-
-    metadata_path = (
-        year_dir
-        / f"dfp_cia_aberta_{year}.csv"
-    )
-
-    required_files = {
-        "DRE": dre_path,
-        "BPP": bpp_path,
-        "metadata": metadata_path,
+    required_paths = {
+        "DRE_con": year_dir / f"dfp_cia_aberta_DRE_con_{year}.csv",
+        "BPP_con": year_dir / f"dfp_cia_aberta_BPP_con_{year}.csv",
+        "metadata": year_dir / f"dfp_cia_aberta_{year}.csv",
     }
 
-    for name, path in required_files.items():
+    for name, path in required_paths.items():
         if not path.exists():
             raise FileNotFoundError(
                 f"Arquivo {name} não encontrado:\n{path}"
             )
 
+    # demonstrações individuais: usadas como fallback para empresas
+    # que não reportam consolidado (sem subsidiárias)
+    optional_paths = {
+        "DRE_ind": year_dir / f"dfp_cia_aberta_DRE_ind_{year}.csv",
+        "BPP_ind": year_dir / f"dfp_cia_aberta_BPP_ind_{year}.csv",
+    }
+
     print(f"\nCarregando DFP {year}")
 
-    dre = read_cvm_csv(dre_path)
-    bpp = read_cvm_csv(bpp_path)
-    metadata = read_cvm_csv(metadata_path)
+    dre_con = read_cvm_csv(required_paths["DRE_con"])
+    bpp_con = read_cvm_csv(required_paths["BPP_con"])
+    metadata = read_cvm_csv(required_paths["metadata"])
 
-    print(f"DRE: {len(dre):,} linhas")
-    print(f"BPP: {len(bpp):,} linhas")
+    print(f"DRE (consolidado): {len(dre_con):,} linhas")
+    print(f"BPP (consolidado): {len(bpp_con):,} linhas")
     print(f"Metadados: {len(metadata):,} linhas")
 
-    return dre, bpp, metadata
+    dre_ind = None
+    bpp_ind = None
+
+    if optional_paths["DRE_ind"].exists():
+        dre_ind = read_cvm_csv(optional_paths["DRE_ind"])
+        print(f"DRE (individual): {len(dre_ind):,} linhas")
+    else:
+        print("DRE (individual): não encontrado, fallback desabilitado")
+
+    if optional_paths["BPP_ind"].exists():
+        bpp_ind = read_cvm_csv(optional_paths["BPP_ind"])
+        print(f"BPP (individual): {len(bpp_ind):,} linhas")
+    else:
+        print("BPP (individual): não encontrado, fallback desabilitado")
+
+    return dre_con, bpp_con, dre_ind, bpp_ind, metadata
 
 
-def extract_account(df, account_code):
+def extract_account(df, account_code, description_pattern=None):
+    """Extrai uma conta pelo CD_CONTA. O plano de contas da CVM não é
+    fixo entre companhias — o mesmo código pode significar coisas
+    diferentes para empresas "normais" e instituições financeiras
+    (ex.: 2.03 é "Patrimônio Líquido" para ~96% das empresas, mas
+    "Provisões" para outras). Quando isso é um risco, account_code
+    pode ser uma lista de códigos candidatos e description_pattern
+    (regex, aplicado a DS_CONTA) filtra os que não batem com o
+    conceito esperado."""
+
     required_columns = [
         "CD_CONTA",
         "CNPJ_CIA",
@@ -117,9 +140,52 @@ def extract_account(df, account_code):
             f"{missing}"
         )
 
+    account_codes = (
+        [account_code]
+        if isinstance(account_code, str)
+        else list(account_code)
+    )
+
     result = df[
-        normalize_text(df["CD_CONTA"]).eq(account_code)
+        normalize_text(df["CD_CONTA"]).isin(account_codes)
     ].copy()
+
+    if description_pattern is not None:
+        if "DS_CONTA" not in df.columns:
+            raise ValueError(
+                "DS_CONTA ausente — necessária para validar "
+                "description_pattern."
+            )
+
+        matches_description = (
+            normalize_text(result["DS_CONTA"])
+            .str.contains(
+                description_pattern,
+                case=False,
+                regex=True,
+                na=False,
+            )
+        )
+
+        result = result[matches_description]
+
+        # uma empresa pode ter mais de um código candidato válido
+        # (planos de contas diferentes) — mantém só um por empresa
+        # e período, priorizando a ordem de account_codes
+        result["_code_priority"] = (
+            normalize_text(result["CD_CONTA"])
+            .map({code: i for i, code in enumerate(account_codes)})
+        )
+
+        result = (
+            result
+            .sort_values("_code_priority")
+            .drop_duplicates(
+                subset=["CNPJ_CIA", "DT_FIM_EXERC"],
+                keep="first",
+            )
+            .drop(columns="_code_priority")
+        )
 
     return result
 
@@ -306,36 +372,145 @@ def remove_exact_duplicates(df):
     return df
 
 
+def extract_account_with_fallback(
+    df_con,
+    df_ind,
+    account_code,
+    source_year,
+    statement_name,
+    description_pattern=None,
+):
+    """Extrai a conta do consolidado; para empresas sem consolidado
+    (sem subsidiárias), completa com a demonstração individual."""
+
+    con_rows = extract_account(
+        df_con,
+        account_code,
+        description_pattern=description_pattern,
+    )
+
+    if df_ind is None:
+        return con_rows
+
+    ind_rows = extract_account(
+        df_ind,
+        account_code,
+        description_pattern=description_pattern,
+    )
+
+    con_companies = set(
+        normalize_text(con_rows["CNPJ_CIA"]).dropna()
+    )
+
+    ind_only_rows = ind_rows[
+        ~normalize_text(ind_rows["CNPJ_CIA"]).isin(con_companies)
+    ]
+
+    if len(ind_only_rows) > 0:
+        print(
+            f"{statement_name} {source_year}: "
+            f"{ind_only_rows['CNPJ_CIA'].nunique()} empresa(s) sem "
+            "consolidado, resolvida(s) via demonstração individual."
+        )
+
+    return pd.concat(
+        [con_rows, ind_only_rows],
+        ignore_index=True,
+    )
+
+
+def keep_latest_filing_per_period(df):
+    """Quando uma empresa reapresenta o mesmo exercício (mesmo
+    DT_FIM_EXERC) mais de uma vez dentro do mesmo ano-calendário da
+    CVM, com DT_REFER diferentes, mantém só a apresentação mais
+    recente — mesmo critério já usado em prepare_metadata()."""
+
+    before = len(df)
+
+    df = (
+        df
+        .sort_values("DT_REFER")
+        .drop_duplicates(
+            subset=[
+                "CNPJ_CIA",
+                "CD_CVM",
+                "DT_FIM_EXERC",
+                "CD_CONTA",
+                "fundamental",
+            ],
+            keep="last",
+        )
+    )
+
+    removed = before - len(df)
+
+    if removed > 0:
+        print(
+            f"Reapresentações do mesmo exercício descartadas "
+            f"(mantida a mais recente): {removed:,}"
+        )
+
+    return df
+
+
 def prepare_fundamentals(
-    dre,
-    bpp,
+    dre_con,
+    bpp_con,
+    dre_ind,
+    bpp_ind,
     metadata,
     source_year,
 ):
-    dre = normalize_dates(
-        dre,
+    dre_con = normalize_dates(
+        dre_con,
         [
             "DT_REFER",
             "DT_FIM_EXERC",
         ],
     )
 
-    bpp = normalize_dates(
-        bpp,
+    bpp_con = normalize_dates(
+        bpp_con,
         [
             "DT_REFER",
             "DT_FIM_EXERC",
         ],
     )
 
-    net_income = extract_account(
-        dre,
+    if dre_ind is not None:
+        dre_ind = normalize_dates(
+            dre_ind,
+            [
+                "DT_REFER",
+                "DT_FIM_EXERC",
+            ],
+        )
+
+    if bpp_ind is not None:
+        bpp_ind = normalize_dates(
+            bpp_ind,
+            [
+                "DT_REFER",
+                "DT_FIM_EXERC",
+            ],
+        )
+
+    net_income = extract_account_with_fallback(
+        dre_con,
+        dre_ind,
         NET_INCOME_ACCOUNT,
+        source_year,
+        "DRE",
+        description_pattern=NET_INCOME_PATTERN,
     )
 
-    equity = extract_account(
-        bpp,
-        EQUITY_ACCOUNT,
+    equity = extract_account_with_fallback(
+        bpp_con,
+        bpp_ind,
+        EQUITY_ACCOUNTS,
+        source_year,
+        "BPP",
+        description_pattern=EQUITY_PATTERN,
     )
 
     if net_income.empty:
@@ -348,7 +523,7 @@ def prepare_fundamentals(
     if equity.empty:
         raise ValueError(
             f"Nenhum registro encontrado para "
-            f"a conta {EQUITY_ACCOUNT} "
+            f"as contas {EQUITY_ACCOUNTS} "
             f"no DFP {source_year}."
         )
 
@@ -361,7 +536,7 @@ def prepare_fundamentals(
 
     equity = prepare_account_data(
         df=equity,
-        account_code=EQUITY_ACCOUNT,
+        account_code=EQUITY_ACCOUNTS,
         fundamental="equity",
         source_year=source_year,
     )
@@ -375,6 +550,10 @@ def prepare_fundamentals(
     )
 
     fundamentals = remove_exact_duplicates(
+        fundamentals
+    )
+
+    fundamentals = keep_latest_filing_per_period(
         fundamentals
     )
 
@@ -646,13 +825,15 @@ def process_all_years():
     all_fundamentals = []
 
     for year in DFP_YEARS:
-        dre, bpp, metadata = load_dfp_data(
+        dre_con, bpp_con, dre_ind, bpp_ind, metadata = load_dfp_data(
             year
         )
 
         fundamentals = prepare_fundamentals(
-            dre=dre,
-            bpp=bpp,
+            dre_con=dre_con,
+            bpp_con=bpp_con,
+            dre_ind=dre_ind,
+            bpp_ind=bpp_ind,
             metadata=metadata,
             source_year=year,
         )
@@ -727,14 +908,14 @@ def main():
     print(
         f"Período de referência: "
         f"{fundamentals['DT_REFER'].min().date()} "
-        f"→ "
+        f"-> "
         f"{fundamentals['DT_REFER'].max().date()}"
     )
 
     print(
         f"Período contábil: "
         f"{fundamentals['DT_FIM_EXERC'].min().date()} "
-        f"→ "
+        f"-> "
         f"{fundamentals['DT_FIM_EXERC'].max().date()}"
     )
 
@@ -746,7 +927,7 @@ def main():
         print(
             f"Período de recebimento: "
             f"{valid_receipt_dates.min().date()} "
-            f"→ "
+            f"-> "
             f"{valid_receipt_dates.max().date()}"
         )
 
