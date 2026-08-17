@@ -1,4 +1,4 @@
-# Quant AI Challenge 2026 - Itaú Asset
+# Quant AI Challenge 2026 - Itaú Asset Management
 
 This repository contains the development and results of the quantitative trading strategy designed for the **Itaú Asset Management Quant AI Challenge**. The project implements an end-to-end (E2E) data pipeline, predictive modeling, and a robust backtesting engine tailored for the Brazilian financial market.
 
@@ -8,20 +8,38 @@ This repository contains the development and results of the quantitative trading
 
 The project follows strict software design patterns to ensure modularity, maintainability, and testability.
 
-### Repository Structure !!!
+### Repository Structure
 ```text
-├── data/                  # Datasets (raw and engineered files via git-lfs)
+├── config/
+│   └── ibrx_portfolios.csv  # Carteiras teóricas do IBrX100 por período (fonte: B3)
+├── data/
+│   ├── raw/                 # Dados brutos — B3, CVM, IBrX100 (não versionado)
+│   └── processed/           # Parquet gerados pelo pipeline
+├── reports/                 # CSVs e gráficos do backtest (gerado por src/backtester.py)
 ├── src/
-│   ├── __init__.py
-│   ├── data_loader.py     # ETL pipeline for data ingestion, cleaning, and integrity
-│   ├── features.py       # Mathematical feature engineering pipeline
-│   ├── model.py          # Model training, cross-validation, and hyperparameter tuning
-│   └── backtester.py     # Vectorized/Event-driven execution engine with friction costs
-├── tests/                 # Unit tests for statistical formulas and risk metrics
-├── config.yaml            # Global parameters, paths, and model hyperparameters
-├── main.py                # Main entry point to run the entire pipeline
-└── requirements.txt       # Frozen project dependencies and versions
+│   ├── download_cvm.py    # Baixa DFP da CVM (2010+) do portal de dados abertos
+│   ├── universe.py        # Universo histórico do IBrX100 (carteiras teóricas)
+│   ├── data.py             # Parsing do COTAHIST (B3) — preços e Ibovespa
+│   ├── fundamentals.py     # Lucro líquido / patrimônio líquido a partir do DFP
+│   ├── features.py        # Indicadores de qualidade e alavancagem (ROE, EBITDA etc.)
+│   ├── ticker_mapping.py   # Pareamento ticker (B3) <-> CD_CVM (CVM)
+│   ├── model.py             # Sinal multifatorial (momentum, qualidade, risco) + overlay de regime
+│   ├── backtester.py       # Rebalanceamento mensal, custos, métricas vs. Ibovespa
+│   └── validation.py       # Validação dos datasets processados
+├── main.py                # Roda o pipeline completo, na ordem
+├── requirements.txt
+└── TODO.md                # Decisões e limitações conhecidas de cada etapa
 ```
+
+### Como rodar
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+Espera dados brutos já baixados em `data/raw/` (B3, CVM, IBrX100 — ver `src/download_cvm.py` para os da CVM). Roda as 8 etapas do pipeline em sequência e para no primeiro erro.
+
 ---
 ## 📑 Academic References 
 
