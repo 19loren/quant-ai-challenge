@@ -9,48 +9,44 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 IBRX_DIR = BASE_DIR / "data" / "raw" / "ibrx100"
 OUTPUT_PATH = BASE_DIR / "data" / "processed" / "universe.parquet"
 
-# config das carteiras
-PORTFOLIOS = [
-    {
-        "file": "jan_abr2025.xlsx",
-        "type": "excel",
-        "start": "2025-01-06",
-        "end": "2025-05-02",
-        "base_date": "2025-01-03",
-    },
-    {
-        "file": "maio_ago_2025.xlsx",
-        "type": "excel",
-        "start": "2025-05-05",
-        "end": "2025-08-29",
-        "base_date": "2025-05-02",
-    },
-    {
-        "file": "VIRADA - SET2025.xlsx",
-        "type": "excel",
-        "start": "2025-09-01",
-        "end": "2026-01-02",
-        "base_date": "2025-08-29",
-    },
-    {
-        "file": "jan_abr2026.xlsx",
-        "type": "excel",
-        "start": "2026-01-05",
-        "end": "2026-04-30",
-        "base_date": "2026-01-02",
-    },
-    {
-        "file": "maio_ago2026.pdf",
-        "type": "pdf",
-        "start": "2026-05-04",
-        "end": "2026-09-04",
-        "base_date": "2026-04-30",
-    },
-]
+# carteiras teóricas do IBrX100: uma linha por período, ver config/README
+PORTFOLIOS_CONFIG_PATH = BASE_DIR / "config" / "ibrx_portfolios.csv"
 
 TICKER_PATTERN = re.compile(
     r"^(?:[A-Z]{4}\d{1,2}|[A-Z]\d[A-Z]{2}\d)$"
 )
+
+
+def load_portfolios_config():
+    if not PORTFOLIOS_CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Config de carteiras não encontrada: "
+            f"{PORTFOLIOS_CONFIG_PATH}"
+        )
+
+    config = pd.read_csv(PORTFOLIOS_CONFIG_PATH)
+
+    required_columns = [
+        "file",
+        "type",
+        "start",
+        "end",
+        "base_date",
+    ]
+
+    missing = [
+        column
+        for column in required_columns
+        if column not in config.columns
+    ]
+
+    if missing:
+        raise ValueError(
+            f"Colunas obrigatórias ausentes em "
+            f"{PORTFOLIOS_CONFIG_PATH.name}: {missing}"
+        )
+
+    return config.to_dict("records")
 
 # ler ibxx excel
 def read_ibrx_excel(path):
@@ -138,11 +134,9 @@ def read_ibrx_pdf(path):
 
     pdf = pymupdf.open(path)
 
-    text = ""
-
-    for page_number in [6, 7]:
-        text += pdf[page_number].get_text()
-        text += "\n"
+    # varre o documento inteiro em vez de páginas fixas, já que a
+    # paginação do boletim muda de uma edição para outra
+    text = "\n".join(page.get_text() for page in pdf)
 
     pdf.close()
 
@@ -310,10 +304,12 @@ def validate_portfolio(df, period_name):
 # processamento
 def build_universe():
 
+    portfolios = load_portfolios_config()
+
     all_portfolios = []
 
 
-    for portfolio in PORTFOLIOS:
+    for portfolio in portfolios:
 
         file_path = (
             IBRX_DIR / portfolio["file"]
@@ -383,17 +379,6 @@ def build_universe():
             "ticker"
         ]
     ).reset_index(drop=True)
-
-    universe = (
-        universe
-        .sort_values(
-            [
-                "period_start",
-                "ticker",
-            ]
-        )
-        .reset_index(drop=True)
-    )
 
     return universe
 
