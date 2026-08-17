@@ -5,6 +5,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 COTAHIST_DIR = BASE_DIR / "data" / "raw" / "b3_quotes"
 OUTPUT_PATH = BASE_DIR / "data" / "processed" / "prices.parquet"
+IBOV_OUTPUT_PATH = BASE_DIR / "data" / "processed" / "ibov.parquet"
 
 # config
 VALID_MARKET_TYPE = "010"
@@ -17,110 +18,151 @@ VALID_SECURITY_TYPES = {
     "UNT",
 }
 
+# o Ibovespa aparece no COTAHIST como um "ativo" (ticker IBOV11) com
+# security_type "IBO/", que não passa no filtro de ações acima —
+# por isso é capturado à parte, no mesmo passe de leitura
+INDEX_TICKERS = {
+    "IBOV11",
+}
+
 def parse_cotahist_file(filepath):
 
     records = []
+    index_records = []
+    zero_close_count = 0
 
     print(f"\nProcessando arquivo: {filepath.name}")
 
     with open(
         filepath,
-        "r", 
+        "r",
         encoding="latin-1"
-        ) as file:
+    ) as file:
 
         # ignora o header
         file.readline()
 
-    for line in file:
+        for line in file:
 
-        # ignora linhas vazias
-        if not line.strip():
-            continue
+            # ignora linhas vazias
+            if not line.strip():
+                continue
 
-        # tipo de registro
-        record_type = line[0:2]
+            # tipo de registro
+            record_type = line[0:2]
 
-        # processa apenas registros de negociação
-        if record_type != "01":
-            continue
+            # processa apenas registros de negociação
+            if record_type != "01":
+                continue
 
-        # extrai campos básicos
-        date = line[2:10]
-        ticker = line[12:24].strip()
-        market_type = line[24:27].strip()
-        name = line[27:39].strip()
-        security_type = line[39:49].strip()
+            # extrai campos básicos
+            date = line[2:10]
+            ticker = line[12:24].strip()
+            market_type = line[24:27].strip()
+            name = line[27:39].strip()
+            security_type = line[39:49].strip()
 
+            if market_type != VALID_MARKET_TYPE:
+                continue
 
-        if market_type != VALID_MARKET_TYPE:
-             continue
+            # indices (ex.: IBOV11) não têm security_type de ação,
+            # então são separados antes do filtro abaixo
+            if ticker in INDEX_TICKERS:
+                index_close_raw = line[108:121].strip()
 
-        # mantem apenas açoes e units
-        security_base = security_type.split()[0]
-        if security_base not in VALID_SECURITY_TYPES:
-            continue
-        
-        # preços
-        open_raw = line[56:69].strip()
-        high_raw = line[69:82].strip()
-        low_raw = line[82:95].strip()
-        avg_raw = line[95:108].strip()
-        close_raw = line[108:121].strip()
+                if not index_close_raw:
+                    continue
 
-        # ignora registros sem preço
-        if not close_raw:
-            continue
+                index_records.append(
+                    {
+                        "date": date,
+                        "ticker": ticker,
+                        "name": name,
+                        "close": float(index_close_raw) / 100,
+                    }
+                )
 
-        # converte preços
-        open_price = float(open_raw) / 100 if open_raw else None
-        high_price = float(high_raw) / 100 if high_raw else None
-        low_price = float(low_raw) / 100 if low_raw else None
-        avg_price = float(avg_raw) / 100 if avg_raw else None
-        close_price = float(close_raw) / 100
+                continue
 
-        # liquidez
-        trade_raw = line[147:152].strip()
-        quantity_raw = line[152:170].strip()
-        volume_raw = line[170:188].strip()
+            # mantem apenas açoes e units
+            security_base = security_type.split()[0]
+            if security_base not in VALID_SECURITY_TYPES:
+                continue
 
-        trades = (
-            int(trade_raw) 
-            if trade_raw 
-            else 0
+            # preços
+            open_raw = line[56:69].strip()
+            high_raw = line[69:82].strip()
+            low_raw = line[82:95].strip()
+            avg_raw = line[95:108].strip()
+            close_raw = line[108:121].strip()
+
+            # ignora registros sem preço
+            if not close_raw:
+                continue
+
+            # converte preços
+            open_price = float(open_raw) / 100 if open_raw else None
+            high_price = float(high_raw) / 100 if high_raw else None
+            low_price = float(low_raw) / 100 if low_raw else None
+            avg_price = float(avg_raw) / 100 if avg_raw else None
+            close_price = float(close_raw) / 100
+
+            # alguns pregões de negócio único vêm com OHLC zerado na
+            # própria fonte (só o preço médio é preenchido) — sem
+            # fechamento não há preço de referência utilizável
+            if close_price <= 0:
+                zero_close_count += 1
+                continue
+
+            # liquidez
+            trade_raw = line[147:152].strip()
+            quantity_raw = line[152:170].strip()
+            volume_raw = line[170:188].strip()
+
+            trades = (
+                int(trade_raw)
+                if trade_raw
+                else 0
             )
-        
-        quantity = (
-            int(quantity_raw)
-            if quantity_raw 
-            else 0
+
+            quantity = (
+                int(quantity_raw)
+                if quantity_raw
+                else 0
             )
-        
-        financial_volume = (
-            float(volume_raw) / 100
-            if volume_raw 
-            else 0
+
+            financial_volume = (
+                float(volume_raw) / 100
+                if volume_raw
+                else 0
+            )
+
+            # adiciona registro
+            records.append(
+                {
+                    "date": date,
+                    "ticker": ticker,
+                    "market_type": market_type,
+                    "name": name,
+                    "security_type": security_type,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "avg_price": avg_price,
+                    "close": close_price,
+                    "trades": trades,
+                    "quantity": quantity,
+                    "financial_volume": financial_volume,
+                }
+            )
+
+    if zero_close_count > 0:
+        print(
+            f"Registros descartados por fechamento zerado: "
+            f"{zero_close_count}"
         )
 
-        # adiciona registro
-        records.append(
-            {
-            "date": date,
-            "ticker": ticker,
-            "market_type": market_type,
-            "name": name,
-            "security_type": security_type,
-            "open": open_price,
-            "high": high_price,
-            "low": low_price,
-            "avg_price": avg_price,
-            "close": close_price,
-            "trades": trades,
-            "quantity": quantity,
-            "financial_volume": financial_volume
-        }
-    )
-    return pd.DataFrame(records)
+    return pd.DataFrame(records), pd.DataFrame(index_records)
 
 # le todos os arquivos encontrados na b3 e retorna o preço
 def load_prices():
@@ -142,20 +184,27 @@ def load_prices():
         print(f" - {file.name}")
 
     all_prices = []
+    all_index = []
 
     for file in files:
-        df = parse_cotahist_file(file)
+        df, index_df = parse_cotahist_file(file)
 
         print(f"Registros elegíveis: {len(df):,}")
 
         all_prices.append(df)
+        all_index.append(index_df)
 
     prices = pd.concat(
         all_prices,
         ignore_index=True
     )
 
-    return prices
+    index_prices = pd.concat(
+        all_index,
+        ignore_index=True
+    )
+
+    return prices, index_prices
 
 # padronizacao
 def standardize_prices(prices):
@@ -191,11 +240,28 @@ def save_prices(prices):
     print(f"Linhas salvas: {len(prices):,}")
 
 
+def save_ibov(index_prices):
+
+    IBOV_OUTPUT_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    index_prices.to_parquet(
+        IBOV_OUTPUT_PATH,
+        index=False
+    )
+
+    print(f"\nArquivo salvo em:\n{IBOV_OUTPUT_PATH}")
+    print(f"Linhas salvas: {len(index_prices):,}")
+
+
 # MAIN POR ENQUANTO
 def main():
 
-    prices = load_prices()
+    prices, index_prices = load_prices()
     prices = standardize_prices(prices)
+    index_prices = standardize_prices(index_prices)
 
     print("RESULTADO")
     print(
@@ -211,7 +277,7 @@ def main():
     print(
         f"Período: "
         f"{prices['date'].min().date()} "
-        f"→ "
+        f"-> "
         f"{prices['date'].max().date()}"
     )
 
@@ -225,6 +291,13 @@ def main():
     print(prices.dtypes)
 
     save_prices(prices)
+
+    print(
+        f"\nRegistros do Ibovespa: "
+        f"{len(index_prices):,}"
+    )
+
+    save_ibov(index_prices)
 
 if __name__ == "__main__":
     main()
